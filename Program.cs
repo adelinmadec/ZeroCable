@@ -1,4 +1,3 @@
-
 using System;
 using System.Drawing;
 using System.Net;
@@ -16,6 +15,9 @@ namespace ZeroCable
         static Form _form;
         static WebView2 _web;
         static Label _status;
+        static TextBox _manualIpBox;
+        static Button _connectBtn;
+        
         static string _currentIp = "";
         static string _currentName = "";
         static int _currentPort = 8080;
@@ -46,6 +48,41 @@ namespace ZeroCable
             _web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
             _form.Controls.Add(_web);
 
+            // --- BARRE DE CONNEXION MANUELLE (NOUVEAU) ---
+            Panel bottomPanel = new Panel { Dock = DockStyle.Bottom, Height = 60, BackColor = Color.FromArgb(10, 14, 23) };
+            
+            _manualIpBox = new TextBox { 
+                Text = "10.10.0.251", // Met l'IP actuelle par défaut
+                Width = 200, 
+                Location = new Point(10, 18),
+                BackColor = Color.FromArgb(18, 24, 38),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            _connectBtn = new Button {
+                Text = "Connecter",
+                Location = new Point(220, 16),
+                Width = 100,
+                Height = 26,
+                BackColor = Color.FromArgb(0, 240, 255),
+                ForeColor = Color.Black,
+                FlatStyle = FlatStyle.Flat
+            };
+            _connectBtn.Click += (s, e) => {
+                string ip = _manualIpBox.Text.Trim();
+                if (!string.IsNullOrEmpty(ip)) {
+                    _currentIp = ip;
+                    _currentName = "Manuel";
+                    if (_webReady) LoadPage();
+                }
+            };
+
+            bottomPanel.Controls.Add(_manualIpBox);
+            bottomPanel.Controls.Add(_connectBtn);
+            _form.Controls.Add(bottomPanel);
+
+            // --- BARRE DE STATUT ---
             _status = new Label {
                 Text = "Recherche du telephone...",
                 Dock = DockStyle.Bottom,
@@ -56,6 +93,7 @@ namespace ZeroCable
                 Font = new Font("Segoe UI", 10, FontStyle.Bold)
             };
             _form.Controls.Add(_status);
+            _status.BringToFront(); // S'assurer que le statut est bien en bas
 
             _form.Load += async (s, e) => {
                 try {
@@ -82,7 +120,6 @@ namespace ZeroCable
             new Thread(() => {
                 UdpClient udp;
                 try { 
-                    // Écoute sur TOUTES les interfaces réseau (indispensable pour le Hotspot)
                     udp = new UdpClient(new IPEndPoint(IPAddress.Any, 8081)); 
                 }
                 catch (Exception ex) { 
@@ -96,7 +133,6 @@ namespace ZeroCable
                         byte[] data = udp.Receive(ref ep);
                         string rawMessage = Encoding.UTF8.GetString(data);
                         
-                        // DEBUG : Afficher tous les signaux reçus
                         _form?.BeginInvoke(new Action(() => { 
                             if (!_webReady) _status.Text = "Signal: " + rawMessage; 
                         }));
@@ -116,6 +152,7 @@ namespace ZeroCable
                         _currentPort = port;
 
                         _form?.BeginInvoke(new Action(() => {
+                            _manualIpBox.Text = ip; // Met à jour la case
                             if (_webReady) LoadPage();
                             else _status.Text = "Trouve : " + name + " @ " + ip + "...";
                         }));
