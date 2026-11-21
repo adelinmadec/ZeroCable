@@ -1,3 +1,4 @@
+
 using System;
 using System.Drawing;
 using System.Net;
@@ -57,18 +58,22 @@ namespace ZeroCable
             _form.Controls.Add(_status);
 
             _form.Load += async (s, e) => {
-                var env = await CoreWebView2Environment.CreateAsync(null, null);
-                await _web.EnsureCoreWebView2Async(env);
+                try {
+                    var env = await CoreWebView2Environment.CreateAsync(null, null);
+                    await _web.EnsureCoreWebView2Async(env);
 
-                _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
-                _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-                _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
-                _web.CoreWebView2.NavigationCompleted += (a, b) => {
-                    if (b.IsSuccess) _status.Text = "Connecte - " + _currentName + " @ " + _currentIp;
-                };
+                    _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                    _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                    _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                    _web.CoreWebView2.NavigationCompleted += (a, b) => {
+                        if (b.IsSuccess) _status.Text = "Connecte - " + _currentName + " @ " + _currentIp;
+                    };
 
-                _webReady = true;
-                if (!string.IsNullOrEmpty(_currentIp)) LoadPage();
+                    _webReady = true;
+                    if (!string.IsNullOrEmpty(_currentIp)) LoadPage();
+                } catch (Exception ex) {
+                    _status.Text = "Erreur WebView2 : " + ex.Message;
+                }
             };
         }
 
@@ -76,14 +81,27 @@ namespace ZeroCable
         {
             new Thread(() => {
                 UdpClient udp;
-                try { udp = new UdpClient(8081); }
-                catch { return; }
+                try { 
+                    // Écoute sur TOUTES les interfaces réseau (indispensable pour le Hotspot)
+                    udp = new UdpClient(new IPEndPoint(IPAddress.Any, 8081)); 
+                }
+                catch (Exception ex) { 
+                    _form?.BeginInvoke(new Action(() => _status.Text = "Erreur port 8081 : " + ex.Message));
+                    return; 
+                }
 
                 while (true) {
                     try {
                         IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
                         byte[] data = udp.Receive(ref ep);
-                        var parts = Encoding.UTF8.GetString(data).Split('|');
+                        string rawMessage = Encoding.UTF8.GetString(data);
+                        
+                        // DEBUG : Afficher tous les signaux reçus
+                        _form?.BeginInvoke(new Action(() => { 
+                            if (!_webReady) _status.Text = "Signal: " + rawMessage; 
+                        }));
+
+                        var parts = rawMessage.Split('|');
                         if (parts.Length != 4 || parts[0] != "ZEROCABLE") continue;
 
                         string name = parts[1];
