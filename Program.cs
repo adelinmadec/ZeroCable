@@ -9,6 +9,8 @@ using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Web.WebView2.Core;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Linq;
+using System.Net.NetworkInformation;
 
 namespace ZeroCable
 {
@@ -20,7 +22,6 @@ namespace ZeroCable
         static Panel _loadingPanel;
         
         static volatile bool _isSearching = false;
-        static volatile bool _webReady = false;
 
         [STAThread]
         static void Main()
@@ -33,29 +34,22 @@ namespace ZeroCable
 
         static void BuildUI()
         {
-            // Fenêtre principale en plein écran (ou presque)
             _form = new Form {
                 Text = "ZeroCable",
                 Width = 800,
                 Height = 600,
                 StartPosition = FormStartPosition.CenterScreen,
                 BackColor = Color.FromArgb(18, 24, 38),
-                ForeColor = Color.FromArgb(226, 232, 240),
-                WindowState = FormWindowState.Maximized // Plein écran
+                WindowState = FormWindowState.Maximized 
             };
 
-            // Le WebView qui prend tout l'espace
             _web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
             _form.Controls.Add(_web);
 
-            // Panneau de chargement (s'affiche tant que la page n'est pas trouvée)
-            _loadingPanel = new Panel { 
-                Dock = DockStyle.Fill, 
-                BackColor = Color.FromArgb(18, 24, 38) 
-            };
+            _loadingPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(18, 24, 38) };
             
             _status = new Label {
-                Text = "Recherche du téléphone sur le réseau...",
+                Text = "Recherche du téléphone (sans Internet)...",
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
                 ForeColor = Color.FromArgb(0, 240, 255),
@@ -67,30 +61,26 @@ namespace ZeroCable
 
             _form.Load += async (s, e) => {
                 try {
-                    // Initialisation du WebView2
                     var env = await CoreWebView2Environment.CreateAsync(null, null);
                     await _web.EnsureCoreWebView2Async(env);
 
-                    // ⚠️ CORRECTION CRUCIALE : Autoriser le HTTP local et ignorer les erreurs de sécurité
                     _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
                     _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                     _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
-                    
-                    // Ignorer les erreurs de sécurité pour les IP locales (10.x.x.x)
-                    _web.CoreWebView2.Settings.IsWebMessageEnabled = true;
                     
                     _web.CoreWebView2.NavigationCompleted += (a, b) => {
                         if (b.IsSuccess) {
                             _loadingPanel.Visible = false;
                             _web.Visible = true;
                         } else {
-                            // Si erreur de sécurité WebView, on affiche un message
-                            _status.Text = "Erreur de connexion. Vérifiez que l'app est ouverte.";
+                            _loadingPanel.Visible = true;
+                            _web.Visible = false;
+                            _status.Text = "Erreur de chargement. Nouvelle recherche...";
                             _status.ForeColor = Color.Red;
+                            _isSearching = false; // Relance la recherche
+                            StartAutoDiscovery();
                         }
                     };
-
-                    _webReady = true;
                 } catch (Exception ex) {
                     _status.Text = "Erreur WebView2 : " + ex.Message;
                 }
@@ -99,70 +89,110 @@ namespace ZeroCable
 
         static void StartAutoDiscovery()
         {
+            if (_isSearching) return;
+            _isSearching = true;
+
             new Thread(() => {
-                _isSearching = true;
                 while (_isSearching) {
                     try {
-                        // 1. Trouver notre propre IP sur le réseau (ex: 10.130.62.1)
-                        string localIp = "";
-                        using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0)) {
-                            socket.Connect("8.8.8.8", 65530);
-                            IPEndPoint endPoint = socket.LocalEndPoint as IPEndPoint;
-                            localIp = endPoint.Address.ToString();
+                        // 1. Trouver les cartes réseaux actives SANS utiliser Internet
+                        List<string> localIps = new List<string>();
+                        foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces()) {
+                            // On ne garde que les cartes WiFi ou Hotspot (pas l'Ethernet ni le virtuel)
+                            if (ni.OperationalStatus == OperationalStatus.Up && 
+                               (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet)) {
+                                foreach (UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses) {
+                                    if (ip.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip.Address)) {
+                                        localIps.Add(ip.Address.ToString());
+                                    }
+                                }
+                            }
                         }
 
-                        string subnet = localIp.Substring(0, localIp.LastIndexOf('.'));
-
-                        _form.BeginInvoke(new Action(() => {
-                            _status.Text = "Recherche sur le réseau " + subnet + ".x...";
-                            _status.ForeColor = Color.Orange;
-                        }));
-
-                        // 2. Scanner toutes les adresses IP du réseau en même temps
-                        List<Task> tasks = new List<Task>();
-                        for (int i = 1; i < 255; i++) {
-                            string testIp = subnet + "." + i;
-                            tasks.Add(Task.Run(() => CheckIp(testIp)));
+                        if (localIps.Count == 0) {
+                            _form.BeginInvoke(new Action(() => {
+                                _status.Text = "Veuillez connecter le PC au WiFi du téléphone.";
+                                _status.ForeColor = Color.Red;
+                            }));
+                            Thread.Sleep(2000);
+                            continue;
                         }
-                        
-                        Task.WaitAll(tasks.ToArray());
+
+                        bool found = false;
+
+                        // 2. Scanner les sous-réseaux trouvés
+                        foreach (string localIp in localIps) {
+                            if (!_isSearching) break;
+
+                            string subnet = localIp.Substring(0, localIp.LastIndexOf('.'));
+                            
+                            _form.BeginInvoke(new Action(() => {
+                                _status.Text = "Scan du réseau " + subnet + ".x...";
+                                _status.ForeColor = Color.Orange;
+                            }));
+
+                            // Les IP de Hotspot Android finissent souvent par .1, .2, .100, etc.
+                            List<int> ipEnds = Enumerable.Range(1, 254).ToList();
+                            int[] priority = { 1, 2, 100, 101, 254, 50, 51, 10, 20 };
+                            foreach (var p in priority) { ipEnds.Remove(p); ipEnds.Insert(0, p); }
+
+                            List<Task> tasks = new List<Task>();
+                            foreach (int i in ipEnds) {
+                                string testIp = subnet + "." + i;
+                                tasks.Add(Task.Run(() => {
+                                    if (CheckIp(testIp)) found = true;
+                                }));
+                                if (found) break;
+                            }
+                            Task.WaitAll(tasks.ToArray());
+                            if (found) break;
+                        }
+
+                        if (!found && _isSearching) {
+                            _form.BeginInvoke(new Action(() => {
+                                _status.Text = "Téléphone introuvable sur ce réseau. Vérifiez le Hotspot.";
+                                _status.ForeColor = Color.Red;
+                            }));
+                        }
                     } catch { }
                     
-                    Thread.Sleep(3000); // Recommencer si pas trouvé
+                    if (_isSearching) Thread.Sleep(2000); 
                 }
             }) { IsBackground = true }.Start();
         }
 
-        static void CheckIp(string ip) {
-            if (!_isSearching) return;
+        static bool CheckIp(string ip) {
+            if (!_isSearching) return false;
 
             try {
                 using (TcpClient client = new TcpClient()) {
+                    // On réduit le timeout à 80ms pour que le scan soit ultra rapide
                     var result = client.BeginConnect(ip, 8080, null, null);
-                    var success = result.AsyncWaitHandle.WaitOne(150); // Timeout court pour aller vite
+                    var success = result.AsyncWaitHandle.WaitOne(80); 
 
                     if (success && client.Connected) {
                         client.EndConnect(result);
                         
-                        // TROUVÉ !
-                        _isSearching = false;
+                        _isSearching = false; 
                         
                         _form.BeginInvoke(new Action(() => {
-                            _status.Text = "Téléphone trouvé ! Chargement...";
+                            _status.Text = "Téléphone trouvé sur " + ip + " ! Chargement...";
                             _status.ForeColor = Color.LimeGreen;
                             
                             string url = $"http://{ip}:8080/";
                             _form.Text = "ZeroCable - " + ip;
                             
                             try {
-                                _web.Source = new Uri(url);
-                            } catch {
-                                _status.Text = "Erreur d'URL : " + url;
+                                _web.CoreWebView2.Navigate(url); 
+                            } catch (Exception ex) {
+                                _status.Text = "Erreur : " + ex.Message;
                             }
                         }));
+                        return true;
                     }
                 }
             } catch { }
+            return false;
         }
     }
 }
