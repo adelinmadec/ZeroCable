@@ -1,108 +1,290 @@
-static void StartAutoDiscovery()
+using System;
+using System.Drawing;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
+using Microsoft.Web.WebView2.Core;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Net.NetworkInformation;
+using System.Linq;
+
+namespace ZeroCable
 {
-    if (_isSearching) return;
-    _isSearching = true;
+    static class Program
+    {
+        static Form _form;
+        static WebView2 _web;
+        static Label _status;
+        static Panel _loadingPanel;
+        static TextBox _manualIpBox;
+        static Button _manualConnectBtn;
+        
+        // Cette variable est très importante, ne l'effacez pas !
+        static volatile bool _isSearching = false;
 
-    new Thread(() => {
-        while (_isSearching) {
-            try
-            {
-                _form.BeginInvoke(new Action(() => { _status.Text = "Vérification des adresses connues..."; }));
+        // Fichier pour sauvegarder les IP connues
+        static string _configFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ZeroCable_IPs.txt");
 
-                bool found = false;
-                string foundIp = null;
+        [STAThread]
+        static void Main()
+        {
+            ApplicationConfiguration.Initialize();
+            BuildUI();
+            StartAutoDiscovery();
+            Application.Run(_form);
+        }
 
-                // 1. D'ABORD : Tester les IP mémorisées
-                List<string> knownIps = LoadKnownIps();
-                foreach (string knownIp in knownIps)
-                {
-                    if (CheckIp(knownIp)) {
-                        found = true;
-                        foundIp = knownIp;
-                        break;
-                    }
+        static void BuildUI()
+        {
+            _form = new Form {
+                Text = "ZeroCable",
+                Width = 800,
+                Height = 600,
+                StartPosition = FormStartPosition.CenterScreen,
+                BackColor = Color.FromArgb(18, 24, 38),
+                WindowState = FormWindowState.Maximized 
+            };
+
+            _web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
+            _form.Controls.Add(_web);
+
+            _loadingPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(18, 24, 38) };
+            
+            _status = new Label {
+                Text = "Recherche du téléphone...",
+                Location = new Point(0, 200),
+                Width = 800,
+                Height = 50,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.FromArgb(0, 240, 255),
+                Font = new Font("Segoe UI", 16, FontStyle.Bold)
+            };
+            
+            _manualIpBox = new TextBox {
+                Location = new Point(250, 300),
+                Width = 200,
+                Font = new Font("Segoe UI", 12),
+                Visible = false
+            };
+            
+            _manualConnectBtn = new Button {
+                Text = "Connexion Manuelle",
+                Location = new Point(460, 298),
+                Width = 150,
+                Height = 30,
+                BackColor = Color.Orange,
+                ForeColor = Color.Black,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Visible = false
+            };
+            
+            _manualConnectBtn.Click += (s, e) => {
+                string ip = _manualIpBox.Text.Trim().Replace("http://", "").Replace(":8080", "").Replace("/", "");
+                if (!string.IsNullOrEmpty(ip)) {
+                    SaveIpToMemory(ip);
+                    LoadPage(ip);
                 }
+            };
 
-                // 2. ENSUITE : Tester les IP "Magiques" (celles que les Hotspots Android utilisent le plus souvent)
-                if (!found && _isSearching)
-                {
-                    _form.BeginInvoke(new Action(() => { _status.Text = "Test des adresses Hotspot typiques..."; }));
+            _loadingPanel.Controls.Add(_status);
+            _loadingPanel.Controls.Add(_manualIpBox);
+            _loadingPanel.Controls.Add(_manualConnectBtn);
+            _form.Controls.Add(_loadingPanel);
+            _loadingPanel.BringToFront();
+
+            _form.Load += async (s, e) => {
+                try {
+                    var env = await CoreWebView2Environment.CreateAsync(null, null);
+                    await _web.EnsureCoreWebView2Async(env);
+                    _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                    _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                    _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
                     
-                    // Liste des IP très souvent utilisées par Android
-                    string[] magicIps = new string[] {
-                        "192.168.43.1", "192.168.43.2", "192.168.43.100", // Android Classique
-                        "10.0.0.1", "10.0.0.2", "10.0.0.10",              // Certains Huawei/Xiaomi
-                        "10.130.62.1", "10.130.62.2", "10.130.62.100",    // Votre réseau actuel
-                        "172.20.10.1", "172.20.10.2",                     // iPhone
-                        "192.168.42.1", "192.168.42.129"                  // Autres Android
-                    };
-
-                    foreach (string magicIp in magicIps)
-                    {
-                        if (CheckIp(magicIp)) {
-                            found = true;
-                            foundIp = magicIp;
-                            break;
+                    _web.CoreWebView2.NavigationCompleted += (a, b) => {
+                        if (b.IsSuccess) {
+                            _loadingPanel.Visible = false;
+                            _web.Visible = true;
+                        } else {
+                            _loadingPanel.Visible = true;
+                            _web.Visible = false;
+                            _status.Text = "Erreur de chargement.";
+                            _status.ForeColor = Color.Red;
                         }
-                    }
+                    };
+                } catch (Exception ex) {
+                    _status.Text = "Erreur WebView2 : " + ex.Message;
                 }
+            };
+        }
 
-                // 3. ENFIN : Si toujours rien, on scanne tout le réseau
-                if (!found && _isSearching)
+        static List<string> LoadKnownIps()
+        {
+            List<string> ips = new List<string>();
+            if (File.Exists(_configFile))
+            {
+                foreach (string line in File.ReadAllLines(_configFile))
                 {
-                    _form.BeginInvoke(new Action(() => { _status.Text = "Scan complet du réseau..."; _status.ForeColor = Color.Orange; }));
+                    if (!string.IsNullOrWhiteSpace(line) && !ips.Contains(line.Trim()))
+                        ips.Add(line.Trim());
+                }
+            }
+            return ips;
+        }
 
-                    string localIp = "";
-                    foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces()) {
-                        if (ni.OperationalStatus == OperationalStatus.Up && ni.NetworkInterfaceType != NetworkInterfaceType.Loopback) {
-                            foreach (UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses) {
-                                if (ip.Address.AddressFamily == AddressFamily.InterNetwork) {
-                                    localIp = ip.Address.ToString();
+        static void SaveIpToMemory(string ip)
+        {
+            List<string> ips = LoadKnownIps();
+            if (!ips.Contains(ip))
+            {
+                ips.Add(ip);
+                File.WriteAllLines(_configFile, ips);
+            }
+        }
+
+        static void StartAutoDiscovery()
+        {
+            if (_isSearching) return;
+            _isSearching = true;
+
+            new Thread(() => {
+                while (_isSearching) {
+                    try
+                    {
+                        _form.BeginInvoke(new Action(() => { _status.Text = "Vérification des adresses connues..."; }));
+
+                        bool found = false;
+                        string foundIp = null;
+
+                        // 1. Tester les IP mémorisées
+                        List<string> knownIps = LoadKnownIps();
+                        foreach (string knownIp in knownIps)
+                        {
+                            if (CheckIp(knownIp)) {
+                                found = true;
+                                foundIp = knownIp;
+                                break;
+                            }
+                        }
+
+                        // 2. Tester les IP Magiques
+                        if (!found && _isSearching)
+                        {
+                            _form.BeginInvoke(new Action(() => { _status.Text = "Test des adresses Hotspot typiques..."; }));
+                            
+                            string[] magicIps = new string[] {
+                                "192.168.43.1", "192.168.43.2", "192.168.43.100",
+                                "10.0.0.1", "10.0.0.2", "10.0.0.10",
+                                "10.130.62.1", "10.130.62.2", "10.130.62.100",
+                                "172.20.10.1", "172.20.10.2",
+                                "192.168.42.1", "192.168.42.129"
+                            };
+
+                            foreach (string magicIp in magicIps)
+                            {
+                                if (CheckIp(magicIp)) {
+                                    found = true;
+                                    foundIp = magicIp;
                                     break;
                                 }
                             }
                         }
-                        if (!string.IsNullOrEmpty(localIp)) break;
-                    }
 
-                    if (!string.IsNullOrEmpty(localIp))
-                    {
-                        string subnet = localIp.Substring(0, localIp.LastIndexOf('.'));
-                        List<Task> tasks = new List<Task>();
-                        object lockObj = new object();
-
-                        for (int i = 1; i < 255; i++)
+                        // 3. Scan complet du réseau
+                        if (!found && _isSearching)
                         {
-                            string testIp = subnet + "." + i;
-                            tasks.Add(Task.Run(() => {
-                                if (CheckIp(testIp)) {
-                                    lock (lockObj) {
-                                        if (!found) { found = true; foundIp = testIp; }
+                            _form.BeginInvoke(new Action(() => { _status.Text = "Scan complet du réseau..."; _status.ForeColor = Color.Orange; }));
+
+                            string localIp = "";
+                            foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces()) {
+                                if (ni.OperationalStatus == OperationalStatus.Up && ni.NetworkInterfaceType != NetworkInterfaceType.Loopback) {
+                                    foreach (UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses) {
+                                        if (ip.Address.AddressFamily == AddressFamily.InterNetwork) {
+                                            localIp = ip.Address.ToString();
+                                            break;
+                                        }
                                     }
                                 }
+                                if (!string.IsNullOrEmpty(localIp)) break;
+                            }
+
+                            if (!string.IsNullOrEmpty(localIp))
+                            {
+                                string subnet = localIp.Substring(0, localIp.LastIndexOf('.'));
+                                List<Task> tasks = new List<Task>();
+                                object lockObj = new object();
+
+                                for (int i = 1; i < 255; i++)
+                                {
+                                    string testIp = subnet + "." + i;
+                                    tasks.Add(Task.Run(() => {
+                                        if (CheckIp(testIp)) {
+                                            lock (lockObj) {
+                                                if (!found) { found = true; foundIp = testIp; }
+                                            }
+                                        }
+                                    }));
+                                }
+                                Task.WaitAll(tasks.ToArray());
+                            }
+                        }
+
+                        // 4. Connexion
+                        if (found && foundIp != null) {
+                            _isSearching = false;
+                            SaveIpToMemory(foundIp); 
+                            LoadPage(foundIp);
+                        } else if (_isSearching) {
+                            _form.BeginInvoke(new Action(() => {
+                                _status.Text = "Entrez l'IP affichée sur l'écran du téléphone :";
+                                _status.ForeColor = Color.Red;
+                                _manualIpBox.Visible = true;
+                                _manualConnectBtn.Visible = true;
                             }));
                         }
-                        Task.WaitAll(tasks.ToArray());
+                    } 
+                    catch { }
+                    if (_isSearching) Thread.Sleep(2000); 
+                }
+            }) { IsBackground = true }.Start();
+        }
+
+        static bool CheckIp(string ip) {
+            if (!_isSearching) return false;
+            try {
+                using (TcpClient client = new TcpClient()) {
+                    var result = client.BeginConnect(ip, 8080, null, null);
+                    var success = result.AsyncWaitHandle.WaitOne(100); 
+                    if (success && client.Connected) {
+                        client.EndConnect(result);
+                        return true;
                     }
                 }
-
-                // 4. Si on a trouvé, on sauvegarde et on se connecte
-                if (found && foundIp != null) {
-                    _isSearching = false;
-                    SaveIpToMemory(foundIp); 
-                    LoadPage(foundIp);
-                } else if (_isSearching) {
-                    // 5. Vraiment rien trouvé : on demande l'IP manuelle
-                    _form.BeginInvoke(new Action(() => {
-                        _status.Text = "Entrez l'IP affichée sur l'écran du téléphone :";
-                        _status.ForeColor = Color.Red;
-                        _manualIpBox.Visible = true;
-                        _manualConnectBtn.Visible = true;
-                    }));
-                }
-            } 
-            catch { }
-            if (_isSearching) Thread.Sleep(2000); 
+            } catch { }
+            return false;
         }
-    }) { IsBackground = true }.Start();
+
+        static void LoadPage(string ip)
+        {
+            _isSearching = false;
+            _form.BeginInvoke(new Action(() => {
+                _status.Text = "Connecté à " + ip + " ! Chargement...";
+                _status.ForeColor = Color.LimeGreen;
+                _manualIpBox.Visible = false;
+                _manualConnectBtn.Visible = false;
+                
+                string url = $"http://{ip}:8080/";
+                _form.Text = "ZeroCable - " + ip;
+                
+                try {
+                    _web.CoreWebView2.Navigate(url); 
+                } catch (Exception ex) {
+                    _status.Text = "Erreur : " + ex.Message;
+                }
+            }));
+        }
+    }
 }
