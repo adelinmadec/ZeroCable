@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Net.NetworkInformation;
 using System.Linq;
+using System.Diagnostics; // Pour lancer la commande netsh
 
 namespace ZeroCable
 {
@@ -23,10 +24,7 @@ namespace ZeroCable
         static TextBox _manualIpBox;
         static Button _manualConnectBtn;
         
-        // Cette variable est très importante, ne l'effacez pas !
         static volatile bool _isSearching = false;
-
-        // Fichier pour sauvegarder les IP connues
         static string _configFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ZeroCable_IPs.txt");
 
         [STAThread]
@@ -55,7 +53,7 @@ namespace ZeroCable
             _loadingPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(18, 24, 38) };
             
             _status = new Label {
-                Text = "Recherche du téléphone...",
+                Text = "Initialisation...",
                 Location = new Point(0, 200),
                 Width = 800,
                 Height = 50,
@@ -121,6 +119,39 @@ namespace ZeroCable
             };
         }
 
+        // --- NOUVELLE FONCTION : RÉCUPÉRER LE NOM DU WIFI ---
+        static string GetCurrentWifiName()
+        {
+            try
+            {
+                Process process = new Process();
+                process.StartInfo.FileName = "netsh";
+                process.StartInfo.Arguments = "wlan show interfaces";
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.Start();
+
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                // Chercher la ligne "SSID" (sans compter "BSSID")
+                foreach (string line in output.Split('\n'))
+                {
+                    if (line.Trim().StartsWith("SSID") && !line.Trim().StartsWith("BSSID"))
+                    {
+                        int index = line.IndexOf(':');
+                        if (index >= 0)
+                        {
+                            return line.Substring(index + 1).Trim();
+                        }
+                    }
+                }
+            }
+            catch { }
+            return "Inconnu (Ethernet ou non connecté)";
+        }
+
         static List<string> LoadKnownIps()
         {
             List<string> ips = new List<string>();
@@ -154,7 +185,12 @@ namespace ZeroCable
                 while (_isSearching) {
                     try
                     {
-                        _form.BeginInvoke(new Action(() => { _status.Text = "Vérification des adresses connues..."; }));
+                        // Affichage du nom du WiFi
+                        string wifiName = GetCurrentWifiName();
+                        _form.BeginInvoke(new Action(() => { 
+                            _status.Text = $"WiFi: {wifiName} | Recherche du téléphone..."; 
+                            _status.ForeColor = Color.Orange;
+                        }));
 
                         bool found = false;
                         string foundIp = null;
@@ -173,8 +209,6 @@ namespace ZeroCable
                         // 2. Tester les IP Magiques
                         if (!found && _isSearching)
                         {
-                            _form.BeginInvoke(new Action(() => { _status.Text = "Test des adresses Hotspot typiques..."; }));
-                            
                             string[] magicIps = new string[] {
                                 "192.168.43.1", "192.168.43.2", "192.168.43.100",
                                 "10.0.0.1", "10.0.0.2", "10.0.0.10",
@@ -196,8 +230,6 @@ namespace ZeroCable
                         // 3. Scan complet du réseau
                         if (!found && _isSearching)
                         {
-                            _form.BeginInvoke(new Action(() => { _status.Text = "Scan complet du réseau..."; _status.ForeColor = Color.Orange; }));
-
                             string localIp = "";
                             foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces()) {
                                 if (ni.OperationalStatus == OperationalStatus.Up && ni.NetworkInterfaceType != NetworkInterfaceType.Loopback) {
@@ -239,7 +271,7 @@ namespace ZeroCable
                             LoadPage(foundIp);
                         } else if (_isSearching) {
                             _form.BeginInvoke(new Action(() => {
-                                _status.Text = "Entrez l'IP affichée sur l'écran du téléphone :";
+                                _status.Text = $"WiFi: {wifiName} | Entrez l'IP manuellement :";
                                 _status.ForeColor = Color.Red;
                                 _manualIpBox.Visible = true;
                                 _manualConnectBtn.Visible = true;
@@ -271,7 +303,8 @@ namespace ZeroCable
         {
             _isSearching = false;
             _form.BeginInvoke(new Action(() => {
-                _status.Text = "Connecté à " + ip + " ! Chargement...";
+                string wifiName = GetCurrentWifiName();
+                _status.Text = $"Connecté sur {wifiName} ({ip}) ! Chargement...";
                 _status.ForeColor = Color.LimeGreen;
                 _manualIpBox.Visible = false;
                 _manualConnectBtn.Visible = false;
