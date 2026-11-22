@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Net.NetworkInformation;
 using System.Linq;
-using System.Diagnostics; // Pour lancer la commande netsh
+using System.Diagnostics;
 
 namespace ZeroCable
 {
@@ -119,7 +119,6 @@ namespace ZeroCable
             };
         }
 
-        // --- NOUVELLE FONCTION : RÉCUPÉRER LE NOM DU WIFI ---
         static string GetCurrentWifiName()
         {
             try
@@ -135,7 +134,6 @@ namespace ZeroCable
                 string output = process.StandardOutput.ReadToEnd();
                 process.WaitForExit();
 
-                // Chercher la ligne "SSID" (sans compter "BSSID")
                 foreach (string line in output.Split('\n'))
                 {
                     if (line.Trim().StartsWith("SSID") && !line.Trim().StartsWith("BSSID"))
@@ -185,7 +183,6 @@ namespace ZeroCable
                 while (_isSearching) {
                     try
                     {
-                        // Affichage du nom du WiFi
                         string wifiName = GetCurrentWifiName();
                         _form.BeginInvoke(new Action(() => { 
                             _status.Text = $"WiFi: {wifiName} | Recherche du téléphone..."; 
@@ -195,7 +192,6 @@ namespace ZeroCable
                         bool found = false;
                         string foundIp = null;
 
-                        // 1. Tester les IP mémorisées
                         List<string> knownIps = LoadKnownIps();
                         foreach (string knownIp in knownIps)
                         {
@@ -206,7 +202,6 @@ namespace ZeroCable
                             }
                         }
 
-                        // 2. Tester les IP Magiques
                         if (!found && _isSearching)
                         {
                             string[] magicIps = new string[] {
@@ -227,7 +222,6 @@ namespace ZeroCable
                             }
                         }
 
-                        // 3. Scan complet du réseau
                         if (!found && _isSearching)
                         {
                             string localIp = "";
@@ -264,7 +258,6 @@ namespace ZeroCable
                             }
                         }
 
-                        // 4. Connexion
                         if (found && foundIp != null) {
                             _isSearching = false;
                             SaveIpToMemory(foundIp); 
@@ -302,6 +295,10 @@ namespace ZeroCable
         static void LoadPage(string ip)
         {
             _isSearching = false;
+            
+            // SÉCURITÉ : On vérifie que la fenêtre et le WebView existent avant d'agir
+            if (_form == null || _form.IsDisposed) return;
+
             _form.BeginInvoke(new Action(() => {
                 string wifiName = GetCurrentWifiName();
                 _status.Text = $"Connecté sur {wifiName} ({ip}) ! Chargement...";
@@ -313,7 +310,13 @@ namespace ZeroCable
                 _form.Text = "ZeroCable - " + ip;
                 
                 try {
-                    _web.CoreWebView2.Navigate(url); 
+                    // SÉCURITÉ : On vérifie que le WebView est prêt
+                    if (_web != null && _web.CoreWebView2 != null) {
+                        _web.CoreWebView2.Navigate(url); 
+                    } else {
+                        // Si le WebView n'est pas prêt, on attend 500ms et on réessaie
+                        Task.Delay(500).ContinueWith(t => LoadPage(ip));
+                    }
                 } catch (Exception ex) {
                     _status.Text = "Erreur : " + ex.Message;
                 }
