@@ -3,7 +3,11 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationIcon>app.ico</ApplicationIcon> <!-- LIGNE AJOUTÉE -->
+    
+    <!-- C'est l'icône (assurez-vous d'avoir app.ico dans le dossier) -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    
+    <!-- C'est ce qui crée un seul fichier .exe autonome -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
